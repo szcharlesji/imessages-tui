@@ -26,6 +26,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::io;
+use std::time::{Duration, Instant};
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
@@ -83,6 +84,7 @@ pub struct App {
     input: String,
     input_mode: bool,
     args: Args,
+    last_refresh: Instant,
 }
 
 impl App {
@@ -121,30 +123,30 @@ impl App {
             input: String::new(),
             input_mode: false,
             args,
+            last_refresh: Instant::now(),
         })
     }
 
-    // Merge duplicated contacts: collapse multiple 1:1 chats that map to the same
-    // contact name, keeping the most recent conversation. Do not merge groups or unknowns.
+    // Merge duplicated contacts: collapse multiple 1:1 chats that resolve to the same
+    // display name (via Contacts or chat display_name), keeping the most recent conversation.
+    // Do not merge group chats.
     fn dedupe_chats(contacts: &ContactsManager, chats: Vec<Chat>) -> Vec<Chat> {
         let mut by_contact: HashMap<String, Chat> = HashMap::new();
         let mut pass_through: Vec<Chat> = Vec::new();
 
         for chat in chats.into_iter() {
             if !chat.is_group {
-                if let Some(name) = contacts.get_contact_name(&chat.chat_identifier) {
-                    let key = name.clone();
-                    let entry = by_contact.entry(key).or_insert(chat.clone());
-                    let a = entry.last_message_date.unwrap_or(0);
-                    let b = chat.last_message_date.unwrap_or(0);
-                    if b > a {
-                        *entry = chat;
-                    }
-                    continue;
+                let key = contacts.get_display_name(&chat.chat_identifier, chat.display_name.as_deref());
+                let entry = by_contact.entry(key).or_insert(chat.clone());
+                let a = entry.last_message_date.unwrap_or(0);
+                let b = chat.last_message_date.unwrap_or(0);
+                if b > a {
+                    *entry = chat;
                 }
+            } else {
+                // Keep groups as-is
+                pass_through.push(chat);
             }
-            // Keep groups and unknown contacts as-is
-            pass_through.push(chat);
         }
 
         let mut merged: Vec<Chat> = by_contact.into_values().collect();
@@ -162,7 +164,14 @@ impl App {
         self.running = true;
         while self.running {
             terminal.draw(|frame| self.render(frame))?;
+            // Handle any pending input without blocking
             self.handle_crossterm_events()?;
+
+            // Periodically refresh messages (poll every 1s)
+            if self.last_refresh.elapsed() >= Duration::from_secs(1) {
+                self.refresh_messages_for_selected_chat(true);
+                self.last_refresh = Instant::now();
+            }
         }
         Ok(())
     }
@@ -349,11 +358,14 @@ impl App {
 
     /// Reads the crossterm events and updates the state of [`App`].
     fn handle_crossterm_events(&mut self) -> Result<()> {
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
-            Event::Mouse(_) => {}
-            Event::Resize(_, _) => {}
-            _ => {}
+        // Non-blocking poll to keep UI responsive and allow timed refreshes
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
+                Event::Mouse(_) => {}
+                Event::Resize(_, _) => {}
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -464,8 +476,8 @@ impl App {
                 } else {
                     self.input.clear();
                     self.input_mode = false; // Exit input mode after sending
-                    // Reload messages after sending
-                    self.load_messages_for_selected_chat();
+                    // Reload messages after sending and jump to latest
+                    self.refresh_messages_for_selected_chat(false);
                 }
             }
         }
@@ -480,6 +492,28 @@ impl App {
                 {
                     self.messages = messages;
                     self.message_scroll = 0;
+                }
+            }
+        }
+    }
+
+    // Refresh messages for the currently selected chat.
+    // If preserve_scroll is true, keep current scroll position (clamped to new size).
+    // If false, jump to latest (bottom).
+    fn refresh_messages_for_selected_chat(&mut self, preserve_scroll: bool) {
+        if let Some(selected) = self.chat_list_state.selected() {
+            if let Some(chat) = self.chats.get(selected) {
+                if let Ok(messages) = self
+                    .database
+                    .get_messages(chat.rowid, Some(self.args.limit))
+                {
+                    self.messages = messages;
+                    if preserve_scroll {
+                        let max_scroll = self.messages.len().saturating_sub(1);
+                        self.message_scroll = self.message_scroll.min(max_scroll);
+                    } else {
+                        self.message_scroll = 0;
+                    }
                 }
             }
         }

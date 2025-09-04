@@ -62,7 +62,6 @@ impl ContactsManager {
                 if output.status.success() {
                     let contacts_data = String::from_utf8_lossy(&output.stdout);
                     self.parse_contacts_result(&contacts_data)?;
-                    println!("✅ Loaded {} contacts", self.contacts_cache.len());
                 } else {
                     let error = String::from_utf8_lossy(&output.stderr);
                     eprintln!("❌ AppleScript error: {}", error);

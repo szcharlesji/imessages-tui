@@ -1,0 +1,16 @@
+[package]
+name = "imessages-tui"
+version = "0.1.0"
+description = "iMessages but in TUI"
+authors = ["Charles Ji <me@charlesji.com>"]
+license = "MIT"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.28.1"
+ratatui = "0.29.0"
+color-eyre = "0.6.3"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+dirs = "5.0.1"
+chrono = "0.4.38"
+clap = { version = "4.5.20", features = ["derive"] }

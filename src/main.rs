@@ -6,6 +6,7 @@ mod test_db;
 use clap::Parser;
 use cli::Args;
 use color_eyre::Result;
+use contacts::ContactsManager;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -14,7 +15,6 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use contacts::ContactsManager;
 use database::{Chat, Database, Message};
 use ratatui::{
     Frame, Terminal,
@@ -24,8 +24,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::io;
 use std::collections::HashMap;
+use std::io;
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
@@ -45,14 +45,14 @@ fn main() -> color_eyre::Result<()> {
         eprintln!("Please run this in Terminal.app, iTerm2, or another terminal emulator.");
         e
     })?;
-    
+
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture).map_err(|e| {
         disable_raw_mode().ok();
         eprintln!("Failed to setup terminal screen: {}", e);
         e
     })?;
-    
+
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend).map_err(|e| {
         disable_raw_mode().ok();
@@ -89,12 +89,13 @@ impl App {
     /// Construct a new instance of [`App`].
     pub fn new(args: Args) -> Result<Self> {
         let database = Database::new(args.db_path.clone())?;
-        
+
         // Load contacts from Contacts app
         let mut contacts = ContactsManager::new();
         contacts.load_contacts()?;
-        
-        let chats_raw = database.get_chats(args.known_only, args.no_groups, Some(args.chat_limit))?;
+
+        let chats_raw =
+            database.get_chats(args.known_only, args.no_groups, Some(args.chat_limit))?;
         // Merge duplicated contacts (same person with multiple identifiers)
         let chats = Self::dedupe_chats(&contacts, chats_raw);
 
@@ -193,7 +194,9 @@ impl App {
             .chats
             .iter()
             .map(|chat| {
-                let name = self.contacts.get_display_name(&chat.chat_identifier, chat.display_name.as_deref());
+                let name = self
+                    .contacts
+                    .get_display_name(&chat.chat_identifier, chat.display_name.as_deref());
                 ListItem::new(name)
             })
             .collect();
@@ -210,26 +213,28 @@ impl App {
         let chat_name = if let Some(selected) = self.chat_list_state.selected() {
             self.chats
                 .get(selected)
-                .map(|chat| self.contacts.get_display_name(&chat.chat_identifier, chat.display_name.as_deref()))
+                .map(|chat| {
+                    self.contacts
+                        .get_display_name(&chat.chat_identifier, chat.display_name.as_deref())
+                })
                 .unwrap_or_else(|| "No Chat Selected".to_string())
         } else {
             "No Chat Selected".to_string()
         };
 
         if self.messages.is_empty() {
-            let messages_widget = Paragraph::new("No messages")
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!("Messages - {}", chat_name)),
-                );
+            let messages_widget = Paragraph::new("No messages").block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Messages - {}", chat_name)),
+            );
             frame.render_widget(messages_widget, area);
             return;
         }
 
         let available_height = area.height.saturating_sub(2) as usize; // Account for borders
         let total_messages = self.messages.len();
-        
+
         // Calculate which messages to show
         // We want to show the last N messages, accounting for scroll offset
         let messages_to_show = if total_messages <= available_height {
@@ -238,14 +243,14 @@ impl App {
         } else {
             available_height
         };
-        
+
         // Start index: show the most recent messages, adjusted by scroll
         let start_index = if total_messages > self.message_scroll {
             (total_messages - self.message_scroll).saturating_sub(messages_to_show)
         } else {
             0
         };
-        
+
         let end_index = if total_messages > self.message_scroll {
             total_messages - self.message_scroll
         } else {
@@ -258,7 +263,8 @@ impl App {
             .skip(start_index)
             .take(end_index - start_index)
             .map(|msg| {
-                let text = database::get_message_text(msg.text.as_ref(), msg.attributed_body.as_ref());
+                let text =
+                    database::get_message_text(msg.text.as_ref(), msg.attributed_body.as_ref());
                 let timestamp = database::format_timestamp(msg.date);
                 let sender = if msg.is_from_me { "Me" } else { &chat_name };
 
@@ -285,9 +291,7 @@ impl App {
             let visible = end_index.saturating_sub(start_index);
             if available_height > visible {
                 let pad = available_height - visible;
-                let mut padding: Vec<Line> = std::iter::repeat(Line::raw(""))
-                    .take(pad)
-                    .collect();
+                let mut padding: Vec<Line> = std::iter::repeat(Line::raw("")).take(pad).collect();
                 padding.append(&mut message_lines);
                 message_lines = padding;
             }
@@ -316,9 +320,9 @@ impl App {
         } else {
             "NAV MODE: j/k: nav chats | Ctrl+U: older | Ctrl+D: newer | Enter: start typing | q/Esc: quit"
         };
-        
-        let instructions = Paragraph::new(instructions_text)
-            .style(Style::default().fg(Color::Gray));
+
+        let instructions =
+            Paragraph::new(instructions_text).style(Style::default().fg(Color::Gray));
         frame.render_widget(instructions, input_chunks[0]);
 
         // Input box with highlighting based on mode
@@ -333,7 +337,7 @@ impl App {
                 .title("Press Enter to type")
                 .border_style(Style::default().fg(Color::Gray))
         };
-        
+
         let input = Paragraph::new(self.input.as_str()).block(input_block);
         frame.render_widget(input, input_chunks[1]);
 

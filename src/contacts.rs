@@ -57,11 +57,7 @@ impl ContactsManager {
         end tell
         "#;
 
-        match Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-        {
+        match Command::new("osascript").arg("-e").arg(script).output() {
             Ok(output) => {
                 if output.status.success() {
                     let contacts_data = String::from_utf8_lossy(&output.stdout);
@@ -87,8 +83,11 @@ impl ContactsManager {
         }
 
         // Remove surrounding braces and split by ", " but be careful with internal commas
-        let cleaned = contacts_string.trim().trim_start_matches('{').trim_end_matches('}');
-        
+        let cleaned = contacts_string
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}');
+
         // Split contacts - need to handle the complex parsing
         let entries = self.split_contact_entries(cleaned);
 
@@ -100,20 +99,31 @@ impl ContactsManager {
             let parts: Vec<&str> = entry.split('|').collect();
             if parts.len() >= 3 {
                 let name = parts[0].trim();
-                let phones: Vec<&str> = parts[1].split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-                let emails: Vec<&str> = parts[2].split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                let phones: Vec<&str> = parts[1]
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let emails: Vec<&str> = parts[2]
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
 
                 // Create lookup entries for all phone numbers and emails
                 for phone in phones {
                     if let Some(normalized_phone) = self.normalize_phone(phone) {
-                        self.contacts_cache.insert(normalized_phone, name.to_string());
-                        self.contacts_cache.insert(phone.to_string(), name.to_string());
+                        self.contacts_cache
+                            .insert(normalized_phone, name.to_string());
+                        self.contacts_cache
+                            .insert(phone.to_string(), name.to_string());
                     }
                 }
 
                 for email in emails {
                     if !email.is_empty() {
-                        self.contacts_cache.insert(email.to_lowercase(), name.to_string());
+                        self.contacts_cache
+                            .insert(email.to_lowercase(), name.to_string());
                     }
                 }
             }
@@ -132,7 +142,7 @@ impl ContactsManager {
 
         while i < chars.len() {
             let ch = chars[i];
-            
+
             if ch == '|' {
                 pipe_count += 1;
                 current_entry.push(ch);
@@ -155,7 +165,7 @@ impl ContactsManager {
             } else {
                 current_entry.push(ch);
             }
-            
+
             i += 1;
         }
 
@@ -183,7 +193,9 @@ impl ContactsManager {
         match digits_only.len() {
             10 => Some(format!("+1{}", digits_only)),
             11 if digits_only.starts_with('1') => Some(format!("+{}", digits_only)),
-            _ if digits_only.len() > 11 && digits_only.starts_with('1') => Some(format!("+{}", digits_only)),
+            _ if digits_only.len() > 11 && digits_only.starts_with('1') => {
+                Some(format!("+{}", digits_only))
+            }
             _ => Some(format!("+{}", digits_only)),
         }
     }
@@ -243,7 +255,7 @@ impl ContactsManager {
         if identifier.starts_with('+') && identifier[1..].chars().all(|c| c.is_ascii_digit()) {
             return identifier.to_string();
         }
-        
+
         // Handle email addresses - show first part if too long
         if identifier.contains('@') {
             if identifier.len() > 25 {
@@ -257,7 +269,7 @@ impl ContactsManager {
             }
             return identifier.to_string();
         }
-        
+
         // For other identifiers, truncate if too long
         if identifier.len() > 25 {
             format!("{}...", &identifier[..22])
@@ -276,3 +288,4 @@ impl ContactsManager {
         self.get_contact_name(identifier).is_some()
     }
 }
+

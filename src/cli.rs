@@ -24,4 +24,3 @@ pub struct Args {
     #[arg(long, default_value_t = 50)]
     pub chat_limit: usize,
 }
-

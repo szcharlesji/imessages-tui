@@ -205,7 +205,7 @@ pub fn extract_text_from_attributed_body(attributed_body: &[u8]) -> Option<Strin
 
         // Skip some preamble bytes (typically 5 bytes after NSString)
         let text_part = &attributed_body[start_pos + 5..];
-        
+
         if text_part.is_empty() {
             return None;
         }
@@ -227,7 +227,7 @@ pub fn extract_text_from_attributed_body(attributed_body: &[u8]) -> Option<Strin
         // Extract the text
         if text_start + text_length <= text_part.len() {
             let text_bytes = &text_part[text_start..text_start + text_length];
-            
+
             // Try to decode as UTF-8
             match String::from_utf8(text_bytes.to_vec()) {
                 Ok(text) => {
@@ -251,7 +251,8 @@ pub fn extract_text_from_attributed_body(attributed_body: &[u8]) -> Option<Strin
     // Fallback: try to find printable ASCII/UTF-8 text in the blob
     match String::from_utf8_lossy(attributed_body).trim() {
         text if text.len() > 2 && text.chars().any(|c| c.is_alphabetic() || c.is_numeric()) => {
-            let cleaned: String = text.chars()
+            let cleaned: String = text
+                .chars()
                 .filter(|c| c.is_ascii_graphic() || c.is_whitespace() || *c as u32 > 127)
                 .collect();
             if cleaned.trim().len() > 2 {
@@ -293,7 +294,6 @@ pub fn get_message_text(text_field: Option<&String>, attributed_body: Option<&Ve
 
     "[No readable text]".to_string()
 }
-
 
 pub fn format_timestamp(timestamp: i64) -> String {
     // Convert from Mac epoch (2001-01-01) to Unix epoch (1970-01-01)

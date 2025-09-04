@@ -17,7 +17,7 @@ pub fn test_database_connection() -> Result<()> {
     println!("✓ Found {} chats", chats.len());
 
     for (i, chat) in chats.iter().take(3).enumerate() {
-        let name = contacts.get_display_name(&chat.chat_identifier);
+        let name = contacts.get_display_name(&chat.chat_identifier, chat.display_name.as_deref());
         let known_indicator = if contacts.is_known_contact(&chat.chat_identifier) { "👤" } else { "❓" };
         let group_indicator = if chat.is_group { " (Group)" } else { "" };
         println!("  {}. {} {}{}", i + 1, known_indicator, name, group_indicator);

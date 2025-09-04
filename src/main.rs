@@ -25,6 +25,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::io;
+use std::collections::HashMap;
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
@@ -35,7 +36,7 @@ fn main() -> color_eyre::Result<()> {
 
     // Check if terminal setup will work
     println!("Starting iMessages TUI...");
-    println!("Use j/k to navigate chats, Ctrl+D/P to scroll messages, Enter to send, q to quit");
+    println!("Use j/k to navigate chats, Ctrl+U/D to scroll messages, Enter to send, q to quit");
 
     // Setup terminal
     enable_raw_mode().map_err(|e| {
@@ -93,7 +94,9 @@ impl App {
         let mut contacts = ContactsManager::new();
         contacts.load_contacts()?;
         
-        let chats = database.get_chats(args.known_only, args.no_groups, Some(args.chat_limit))?;
+        let chats_raw = database.get_chats(args.known_only, args.no_groups, Some(args.chat_limit))?;
+        // Merge duplicated contacts (same person with multiple identifiers)
+        let chats = Self::dedupe_chats(&contacts, chats_raw);
 
         let mut chat_list_state = ListState::default();
         if !chats.is_empty() {
@@ -118,6 +121,39 @@ impl App {
             input_mode: false,
             args,
         })
+    }
+
+    // Merge duplicated contacts: collapse multiple 1:1 chats that map to the same
+    // contact name, keeping the most recent conversation. Do not merge groups or unknowns.
+    fn dedupe_chats(contacts: &ContactsManager, chats: Vec<Chat>) -> Vec<Chat> {
+        let mut by_contact: HashMap<String, Chat> = HashMap::new();
+        let mut pass_through: Vec<Chat> = Vec::new();
+
+        for chat in chats.into_iter() {
+            if !chat.is_group {
+                if let Some(name) = contacts.get_contact_name(&chat.chat_identifier) {
+                    let key = name.clone();
+                    let entry = by_contact.entry(key).or_insert(chat.clone());
+                    let a = entry.last_message_date.unwrap_or(0);
+                    let b = chat.last_message_date.unwrap_or(0);
+                    if b > a {
+                        *entry = chat;
+                    }
+                    continue;
+                }
+            }
+            // Keep groups and unknown contacts as-is
+            pass_through.push(chat);
+        }
+
+        let mut merged: Vec<Chat> = by_contact.into_values().collect();
+        merged.extend(pass_through);
+
+        // Sort by last message date desc (most recent first)
+        merged.sort_by_key(|c| c.last_message_date.unwrap_or(0));
+        merged.reverse();
+
+        merged
     }
 
     /// Run the application's main loop.
@@ -157,9 +193,8 @@ impl App {
             .chats
             .iter()
             .map(|chat| {
-                let name = self.contacts.get_display_name(&chat.chat_identifier);
-                let group_indicator = if chat.is_group { " (Group)" } else { "" };
-                ListItem::new(format!("{}{}", name, group_indicator))
+                let name = self.contacts.get_display_name(&chat.chat_identifier, chat.display_name.as_deref());
+                ListItem::new(name)
             })
             .collect();
 
@@ -175,16 +210,53 @@ impl App {
         let chat_name = if let Some(selected) = self.chat_list_state.selected() {
             self.chats
                 .get(selected)
-                .map(|chat| self.contacts.get_display_name(&chat.chat_identifier))
+                .map(|chat| self.contacts.get_display_name(&chat.chat_identifier, chat.display_name.as_deref()))
                 .unwrap_or_else(|| "No Chat Selected".to_string())
         } else {
             "No Chat Selected".to_string()
         };
 
-        let message_lines: Vec<Line> = self
+        if self.messages.is_empty() {
+            let messages_widget = Paragraph::new("No messages")
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("Messages - {}", chat_name)),
+                );
+            frame.render_widget(messages_widget, area);
+            return;
+        }
+
+        let available_height = area.height.saturating_sub(2) as usize; // Account for borders
+        let total_messages = self.messages.len();
+        
+        // Calculate which messages to show
+        // We want to show the last N messages, accounting for scroll offset
+        let messages_to_show = if total_messages <= available_height {
+            // All messages fit, show them all
+            total_messages
+        } else {
+            available_height
+        };
+        
+        // Start index: show the most recent messages, adjusted by scroll
+        let start_index = if total_messages > self.message_scroll {
+            (total_messages - self.message_scroll).saturating_sub(messages_to_show)
+        } else {
+            0
+        };
+        
+        let end_index = if total_messages > self.message_scroll {
+            total_messages - self.message_scroll
+        } else {
+            total_messages
+        };
+
+        let mut message_lines: Vec<Line> = self
             .messages
             .iter()
-            .skip(self.message_scroll)
+            .skip(start_index)
+            .take(end_index - start_index)
             .map(|msg| {
                 let text = database::get_message_text(msg.text.as_ref(), msg.attributed_body.as_ref());
                 let timestamp = database::format_timestamp(msg.date);
@@ -208,6 +280,19 @@ impl App {
             })
             .collect();
 
+        // Bottom-align when content is shorter than viewport and we're at the latest
+        if end_index == total_messages {
+            let visible = end_index.saturating_sub(start_index);
+            if available_height > visible {
+                let pad = available_height - visible;
+                let mut padding: Vec<Line> = std::iter::repeat(Line::raw(""))
+                    .take(pad)
+                    .collect();
+                padding.append(&mut message_lines);
+                message_lines = padding;
+            }
+        }
+
         let messages_widget = Paragraph::new(message_lines)
             .block(
                 Block::default()
@@ -229,7 +314,7 @@ impl App {
         let instructions_text = if self.input_mode {
             "TYPING MODE: Type your message | Enter: send | Esc: exit typing mode | Ctrl+C: quit"
         } else {
-            "NAV MODE: j/k: nav chats | Ctrl+D/P: scroll msgs | Enter: start typing | q/Esc: quit"
+            "NAV MODE: j/k: nav chats | Ctrl+U: older | Ctrl+D: newer | Enter: start typing | q/Esc: quit"
         };
         
         let instructions = Paragraph::new(instructions_text)
@@ -306,8 +391,10 @@ impl App {
                 (_, KeyCode::Char('k') | KeyCode::Up) => self.select_previous_chat(),
 
                 // Message scrolling
-                (KeyModifiers::CONTROL, KeyCode::Char('d')) => self.scroll_messages_down(),
-                (KeyModifiers::CONTROL, KeyCode::Char('p')) => self.scroll_messages_up(),
+                // Ctrl+U: go to older messages (move view upward in time)
+                (KeyModifiers::CONTROL, KeyCode::Char('u')) => self.scroll_messages_older(),
+                // Ctrl+D: go toward latest (move view downward in time)
+                (KeyModifiers::CONTROL, KeyCode::Char('d')) => self.scroll_messages_newer(),
 
                 // Enter input mode
                 (_, KeyCode::Enter) => {
@@ -345,13 +432,16 @@ impl App {
         self.load_messages_for_selected_chat();
     }
 
-    fn scroll_messages_down(&mut self) {
-        if self.message_scroll < self.messages.len().saturating_sub(10) {
-            self.message_scroll += 5;
+    fn scroll_messages_older(&mut self) {
+        // Show older messages (scroll back in history)
+        let max_scroll = self.messages.len().saturating_sub(1);
+        if self.message_scroll < max_scroll {
+            self.message_scroll = (self.message_scroll + 5).min(max_scroll);
         }
     }
 
-    fn scroll_messages_up(&mut self) {
+    fn scroll_messages_newer(&mut self) {
+        // Show newer messages (scroll forward toward latest)
         self.message_scroll = self.message_scroll.saturating_sub(5);
     }
 

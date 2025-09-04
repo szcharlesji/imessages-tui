@@ -226,10 +226,12 @@ impl ContactsManager {
         None
     }
 
-    /// Get a friendly display name, using contact name or formatted identifier
-    pub fn get_display_name(&self, identifier: &str) -> String {
+    /// Get a friendly display name, using contact name or provided fallback
+    pub fn get_display_name(&self, identifier: &str, fallback: Option<&str>) -> String {
         if let Some(contact_name) = self.get_contact_name(identifier) {
             contact_name.clone()
+        } else if let Some(fallback_name) = fallback {
+            fallback_name.to_string()
         } else {
             self.format_identifier(identifier)
         }

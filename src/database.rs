@@ -73,14 +73,17 @@ impl Database {
               AND m.service = 'iMessage'",
         );
 
+        // Always filter to only show chats where user has replied
+        query.push_str(
+            " AND EXISTS (
+            SELECT 1 FROM message m2 
+            JOIN chat_message_join cmj2 ON m2.ROWID = cmj2.message_id 
+            WHERE cmj2.chat_id = c.ROWID AND m2.is_from_me = 1
+        )",
+        );
+
         if known_only {
-            query.push_str(
-                " AND c.display_name IS NOT NULL AND EXISTS (
-                SELECT 1 FROM message m2 
-                JOIN chat_message_join cmj2 ON m2.ROWID = cmj2.message_id 
-                WHERE cmj2.chat_id = c.ROWID AND m2.is_from_me = 1
-            )",
-            );
+            query.push_str(" AND c.display_name IS NOT NULL");
         }
 
         if no_groups {
@@ -132,8 +135,10 @@ impl Database {
         );
 
         if let Some(limit) = limit {
+            // Get the last N messages but return them in ascending order
+            // Inner query orders DESC and limits, outer re-orders ASC
             query = format!(
-                "SELECT * FROM ({}) ORDER BY date DESC LIMIT {}",
+                "SELECT * FROM ({} LIMIT {}) ORDER BY date ASC",
                 query.replace("ORDER BY m.date ASC", "ORDER BY m.date DESC"),
                 limit
             );
@@ -155,10 +160,6 @@ impl Database {
         let mut messages = Vec::new();
         for message in message_iter {
             messages.push(message?);
-        }
-
-        if limit.is_some() {
-            messages.reverse();
         }
 
         Ok(messages)
@@ -311,4 +312,3 @@ pub fn format_timestamp(timestamp: i64) -> String {
         String::new()
     }
 }
-

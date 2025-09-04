@@ -1,4 +1,5 @@
 mod cli;
+mod contacts;
 mod database;
 mod test_db;
 
@@ -12,8 +13,8 @@ use crossterm::{
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-    tty::IsTty,
 };
+use contacts::ContactsManager;
 use database::{Chat, Database, Message};
 use ratatui::{
     Frame, Terminal,
@@ -73,11 +74,13 @@ fn main() -> color_eyre::Result<()> {
 pub struct App {
     running: bool,
     database: Database,
+    contacts: ContactsManager,
     chats: Vec<Chat>,
     messages: Vec<Message>,
     chat_list_state: ListState,
     message_scroll: usize,
     input: String,
+    input_mode: bool,
     args: Args,
 }
 
@@ -85,6 +88,11 @@ impl App {
     /// Construct a new instance of [`App`].
     pub fn new(args: Args) -> Result<Self> {
         let database = Database::new(args.db_path.clone())?;
+        
+        // Load contacts from Contacts app
+        let mut contacts = ContactsManager::new();
+        contacts.load_contacts()?;
+        
         let chats = database.get_chats(args.known_only, args.no_groups, Some(args.chat_limit))?;
 
         let mut chat_list_state = ListState::default();
@@ -101,11 +109,13 @@ impl App {
         Ok(Self {
             running: false,
             database,
+            contacts,
             chats,
             messages,
             chat_list_state,
             message_scroll: 0,
             input: String::new(),
+            input_mode: false,
             args,
         })
     }
@@ -129,7 +139,7 @@ impl App {
 
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .constraints([Constraint::Min(0), Constraint::Length(4)])
             .split(chunks[1]);
 
         // Chat list (left panel)
@@ -147,10 +157,7 @@ impl App {
             .chats
             .iter()
             .map(|chat| {
-                let name = chat
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&chat.chat_identifier);
+                let name = self.contacts.get_display_name(&chat.chat_identifier);
                 let group_indicator = if chat.is_group { " (Group)" } else { "" };
                 ListItem::new(format!("{}{}", name, group_indicator))
             })
@@ -168,14 +175,10 @@ impl App {
         let chat_name = if let Some(selected) = self.chat_list_state.selected() {
             self.chats
                 .get(selected)
-                .map(|chat| {
-                    chat.display_name
-                        .as_deref()
-                        .unwrap_or(&chat.chat_identifier)
-                })
-                .unwrap_or("No Chat Selected")
+                .map(|chat| self.contacts.get_display_name(&chat.chat_identifier))
+                .unwrap_or_else(|| "No Chat Selected".to_string())
         } else {
-            "No Chat Selected"
+            "No Chat Selected".to_string()
         };
 
         let message_lines: Vec<Line> = self
@@ -183,9 +186,9 @@ impl App {
             .iter()
             .skip(self.message_scroll)
             .map(|msg| {
-                let text = msg.text.as_deref().unwrap_or("<no text>");
+                let text = database::get_message_text(msg.text.as_ref(), msg.attributed_body.as_ref());
                 let timestamp = database::format_timestamp(msg.date);
-                let sender = if msg.is_from_me { "Me" } else { chat_name };
+                let sender = if msg.is_from_me { "Me" } else { &chat_name };
 
                 Line::from(vec![
                     Span::styled(
@@ -219,18 +222,34 @@ impl App {
     fn render_input(&mut self, frame: &mut Frame, area: Rect) {
         let input_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(2)])
+            .constraints([Constraint::Length(1), Constraint::Length(3)])
             .split(area);
 
-        // Instructions
-        let instructions =
-            Paragraph::new("j/k: nav chats | Ctrl+D/P: scroll msgs | Enter: send | Esc/q: quit")
-                .style(Style::default().fg(Color::Gray));
+        // Instructions based on current mode
+        let instructions_text = if self.input_mode {
+            "TYPING MODE: Type your message | Enter: send | Esc: exit typing mode | Ctrl+C: quit"
+        } else {
+            "NAV MODE: j/k: nav chats | Ctrl+D/P: scroll msgs | Enter: start typing | q/Esc: quit"
+        };
+        
+        let instructions = Paragraph::new(instructions_text)
+            .style(Style::default().fg(Color::Gray));
         frame.render_widget(instructions, input_chunks[0]);
 
-        // Input box
-        let input = Paragraph::new(self.input.as_str())
-            .block(Block::default().borders(Borders::ALL).title("Type message"));
+        // Input box with highlighting based on mode
+        let input_block = if self.input_mode {
+            Block::default()
+                .borders(Borders::ALL)
+                .title("[TYPING] Type message")
+                .border_style(Style::default().fg(Color::Green))
+        } else {
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Press Enter to type")
+                .border_style(Style::default().fg(Color::Gray))
+        };
+        
+        let input = Paragraph::new(self.input.as_str()).block(input_block);
         frame.render_widget(input, input_chunks[1]);
 
         // Show cursor (limit position to avoid overflow)
@@ -252,31 +271,51 @@ impl App {
 
     /// Handles the key events and updates the state of [`App`].
     fn on_key_event(&mut self, key: KeyEvent) {
-        match (key.modifiers, key.code) {
-            // Quit
-            (_, KeyCode::Esc | KeyCode::Char('q'))
-            | (KeyModifiers::CONTROL, KeyCode::Char('c')) => self.quit(),
-
-            // Chat navigation
-            (_, KeyCode::Char('j') | KeyCode::Down) => self.select_next_chat(),
-            (_, KeyCode::Char('k') | KeyCode::Up) => self.select_previous_chat(),
-
-            // Message scrolling
-            (KeyModifiers::CONTROL, KeyCode::Char('d')) => self.scroll_messages_down(),
-            (KeyModifiers::CONTROL, KeyCode::Char('p')) => self.scroll_messages_up(),
-
-            // Send message
-            (_, KeyCode::Enter) => self.send_message(),
-
-            // Input handling
-            (_, KeyCode::Backspace) => {
-                self.input.pop();
+        if self.input_mode {
+            // Input mode: handle typing and sending
+            match (key.modifiers, key.code) {
+                // Global quit (Ctrl+C) - check first before char matching
+                (KeyModifiers::CONTROL, KeyCode::Char('c')) => self.quit(),
+                // Exit input mode
+                (_, KeyCode::Esc) => {
+                    self.input_mode = false;
+                }
+                // Send message
+                (_, KeyCode::Enter) => {
+                    self.send_message();
+                }
+                // Input handling
+                (_, KeyCode::Backspace) => {
+                    self.input.pop();
+                }
+                // Type characters (including j, k, q)
+                (_, KeyCode::Char(c)) => {
+                    self.input.push(c);
+                }
+                _ => {}
             }
-            (_, KeyCode::Char(c)) => {
-                self.input.push(c);
-            }
+        } else {
+            // Navigation mode: handle navigation and mode switching
+            match (key.modifiers, key.code) {
+                // Quit
+                (_, KeyCode::Esc | KeyCode::Char('q'))
+                | (KeyModifiers::CONTROL, KeyCode::Char('c')) => self.quit(),
 
-            _ => {}
+                // Chat navigation
+                (_, KeyCode::Char('j') | KeyCode::Down) => self.select_next_chat(),
+                (_, KeyCode::Char('k') | KeyCode::Up) => self.select_previous_chat(),
+
+                // Message scrolling
+                (KeyModifiers::CONTROL, KeyCode::Char('d')) => self.scroll_messages_down(),
+                (KeyModifiers::CONTROL, KeyCode::Char('p')) => self.scroll_messages_up(),
+
+                // Enter input mode
+                (_, KeyCode::Enter) => {
+                    self.input_mode = true;
+                }
+
+                _ => {}
+            }
         }
     }
 
@@ -330,6 +369,7 @@ impl App {
                     eprintln!("Failed to send message: {}", e);
                 } else {
                     self.input.clear();
+                    self.input_mode = false; // Exit input mode after sending
                     // Reload messages after sending
                     self.load_messages_for_selected_chat();
                 }

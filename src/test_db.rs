@@ -1,22 +1,26 @@
-use crate::database::Database;
+use crate::contacts::ContactsManager;
+use crate::database::{Database, get_message_text};
 use color_eyre::Result;
 
 pub fn test_database_connection() -> Result<()> {
-    println!("Testing database connection...");
+    println!("Testing database connection with contacts...");
 
+    // Test database connection
     let db = Database::new(None)?;
     println!("✓ Database connection successful");
+
+    // Load contacts
+    let mut contacts = ContactsManager::new();
+    contacts.load_contacts()?;
 
     let chats = db.get_chats(false, false, Some(5))?;
     println!("✓ Found {} chats", chats.len());
 
     for (i, chat) in chats.iter().take(3).enumerate() {
-        let name = chat
-            .display_name
-            .as_deref()
-            .unwrap_or(&chat.chat_identifier);
+        let name = contacts.get_display_name(&chat.chat_identifier);
+        let known_indicator = if contacts.is_known_contact(&chat.chat_identifier) { "👤" } else { "❓" };
         let group_indicator = if chat.is_group { " (Group)" } else { "" };
-        println!("  {}. {}{}", i + 1, name, group_indicator);
+        println!("  {}. {} {}{}", i + 1, known_indicator, name, group_indicator);
     }
 
     if !chats.is_empty() {
@@ -24,7 +28,7 @@ pub fn test_database_connection() -> Result<()> {
         println!("✓ Found {} messages in first chat", messages.len());
 
         for message in messages.iter().take(2) {
-            let text = message.text.as_deref().unwrap_or("<no text>");
+            let text = get_message_text(message.text.as_ref(), message.attributed_body.as_ref());
             let sender = if message.is_from_me { "Me" } else { "Other" };
             println!(
                 "  {}: {} (rowid: {}, len: {})",
@@ -36,6 +40,7 @@ pub fn test_database_connection() -> Result<()> {
         }
     }
 
+    println!("✓ Total contacts loaded: {}", contacts.contact_count());
     Ok(())
 }
 

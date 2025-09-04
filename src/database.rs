@@ -20,6 +20,7 @@ pub struct Chat {
 pub struct Message {
     pub rowid: i64,
     pub text: Option<String>,
+    pub attributed_body: Option<Vec<u8>>,
     pub is_from_me: bool,
     pub date: i64,
     pub handle_id: Option<i64>,
@@ -65,9 +66,11 @@ impl Database {
                 CASE WHEN c.style = 45 THEN 1 ELSE 0 END as is_group,
                 MAX(m.date) as last_message_date
             FROM chat c
-            LEFT JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
-            LEFT JOIN message m ON cmj.message_id = m.ROWID
-            WHERE c.chat_identifier IS NOT NULL AND c.chat_identifier != ''",
+            JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
+            JOIN message m ON cmj.message_id = m.ROWID
+            WHERE c.chat_identifier IS NOT NULL 
+              AND c.chat_identifier != ''
+              AND m.service = 'iMessage'",
         );
 
         if known_only {
@@ -116,6 +119,7 @@ impl Database {
             "SELECT 
                 m.ROWID,
                 m.text,
+                m.attributedBody,
                 m.is_from_me,
                 m.date,
                 m.handle_id,
@@ -123,9 +127,7 @@ impl Database {
             FROM message m
             JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
             WHERE cmj.chat_id = ?
-              AND m.text IS NOT NULL 
-              AND length(m.text) > 0
-              AND m.text NOT LIKE '%￼%'
+              AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
             ORDER BY m.date ASC",
         );
 
@@ -142,10 +144,11 @@ impl Database {
             Ok(Message {
                 rowid: row.get(0)?,
                 text: row.get(1)?,
-                is_from_me: row.get::<_, i32>(2)? == 1,
-                date: row.get(3)?,
-                handle_id: row.get(4)?,
-                service: row.get(5)?,
+                attributed_body: row.get(2)?,
+                is_from_me: row.get::<_, i32>(3)? == 1,
+                date: row.get(4)?,
+                handle_id: row.get(5)?,
+                service: row.get(6)?,
             })
         })?;
 
@@ -181,6 +184,115 @@ impl Database {
         Ok(())
     }
 }
+
+/// Extract text content from NSAttributedString BLOB data
+pub fn extract_text_from_attributed_body(attributed_body: &[u8]) -> Option<String> {
+    if attributed_body.is_empty() {
+        return None;
+    }
+
+    // Look for NSString pattern
+    let ns_string_marker = b"NSString";
+    if let Some(ns_string_pos) = attributed_body
+        .windows(ns_string_marker.len())
+        .position(|window| window == ns_string_marker)
+    {
+        let start_pos = ns_string_pos + ns_string_marker.len();
+        if start_pos + 5 >= attributed_body.len() {
+            return None;
+        }
+
+        // Skip some preamble bytes (typically 5 bytes after NSString)
+        let text_part = &attributed_body[start_pos + 5..];
+        
+        if text_part.is_empty() {
+            return None;
+        }
+
+        // Parse length encoding
+        let (text_length, text_start) = if text_part[0] == 0x81 {
+            // Extended length encoding (2-byte little-endian)
+            if text_part.len() < 3 {
+                return None;
+            }
+            let length = u16::from_le_bytes([text_part[1], text_part[2]]) as usize;
+            (length, 3)
+        } else {
+            // Single byte length
+            let length = text_part[0] as usize;
+            (length, 1)
+        };
+
+        // Extract the text
+        if text_start + text_length <= text_part.len() {
+            let text_bytes = &text_part[text_start..text_start + text_length];
+            
+            // Try to decode as UTF-8
+            match String::from_utf8(text_bytes.to_vec()) {
+                Ok(text) => {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+                Err(_) => {
+                    // Try with lossy conversion
+                    let text = String::from_utf8_lossy(text_bytes);
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: try to find printable ASCII/UTF-8 text in the blob
+    match String::from_utf8_lossy(attributed_body).trim() {
+        text if text.len() > 2 && text.chars().any(|c| c.is_alphabetic() || c.is_numeric()) => {
+            let cleaned: String = text.chars()
+                .filter(|c| c.is_ascii_graphic() || c.is_whitespace() || *c as u32 > 127)
+                .collect();
+            if cleaned.trim().len() > 2 {
+                Some(cleaned.trim().to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Get the actual message text from text field or attributedBody
+pub fn get_message_text(text_field: Option<&String>, attributed_body: Option<&Vec<u8>>) -> String {
+    // First try the regular text field
+    if let Some(text) = text_field {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && trimmed != "￼" {
+            return trimmed.to_string();
+        }
+    }
+
+    // Try to extract from attributedBody
+    if let Some(blob) = attributed_body {
+        if let Some(extracted) = extract_text_from_attributed_body(blob) {
+            let trimmed = extracted.trim();
+            if !trimmed.is_empty() && trimmed != "￼" {
+                return trimmed.to_string();
+            }
+        }
+    }
+
+    // Handle attachment indicator
+    if let Some(text) = text_field {
+        if text.trim() == "￼" {
+            return "[Attachment]".to_string();
+        }
+    }
+
+    "[No readable text]".to_string()
+}
+
 
 pub fn format_timestamp(timestamp: i64) -> String {
     // Convert from Mac epoch (2001-01-01) to Unix epoch (1970-01-01)

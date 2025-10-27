@@ -13,4 +13,4 @@ color-eyre = "0.6.3"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 dirs = "5.0.1"
 chrono = "0.4.38"
-clap = { version = "4.5.20", features = ["derive"] }
+clap = { version = "4.5.50", features = ["derive"] }
